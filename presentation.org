@@ -1,3 +1,69 @@
 #+title: Nix 4 U
 
-*
+* Who are you and why do you use Nix?
+
+** I assume you may use:
+
+1. Nix - maybe as a ~pacman~ or ~apt~ replacement - I.E. ~nix-env -iA lldb~
+2. Flakes some - maybe via a dev tooling setup like ~github:srid/haskell-flake~ or ~github:ipetkov/crane~
+3. NixOS via ~nixos-rebuild~ and ~/etc/nixos/configuration.nix~ or ~/etc/nixos/flake.nix~
+
+** You probably like Nix for the:
+
+1. declarative specification of package sets and systems
+2. reproducible dev and operating system environments
+3. flexibility to patch/override software without the intervention of a sysadmin or IT
+  - (without losing track of what was installed where and how!)
+
+** And I'd like to give you a leg up so you can
+
+1. use Nix and NixOS in production
+2. apply NixOS to real-world deployment scenarios
+3. understand how _not_ to use Nix/NixOS
+
+* Shoutouts to Gabriella Gonzalez who already literally wrote the book
+
+If this talk at all interests you go read [[https://leanpub.com/nixos-in-production][NixOS in Production]] - it
+will get you straight from zero NixOS running your services complete
+with slick tooling and polished user experience.
+
+* Values of the Nix/NixOS community and technology
+
+This is worth bearing in mind as you assess the usefulness of these
+tools in production.
+
+It can be very painful to adopt a technology without first aligning
+your values with that of the community/technology. It can end very
+painfully if you do not - see [[https://www.youtube.com/watch?v=9QMGAtxUlAc][Node.js and Joyent]] for a "fun" example.
+
+** Tech value 1: "The Zen of Nix"
+
+#+begin_quote
+Every common build/test/deploy-related activity should be possible
+with at most one command using Nix's command-line interface
+-- Gabriella Gonzalez
+#+end_quote
+
+This is a value that seems lovely and useful on the surface - and is
+in fact probably the biggest selling point of Nix as a productivity
+tool.
+
+I certainly love this tenet.
+
+*However* you may chafe with this value if you tend to reach for
+scripts, automation, or some favorite tool as your first solution.
+
+What this value means in practice is that you will be writing more Nix
+code than shell, haskell, elixir, rust, lua, go (insert your favorite
+language here) to coordinate package, process, and system definitions.
+
+This zen quality of nix workflows, in fact, stems from Nix' properties
+as a pure, lazy, functional programming language.
+
+This is a silly thing to say but: if you do not like Nix the
+programming language, you will likely not enjoy the experience of
+using the Nix ecosystem in anger.
+
+** Tech value 2: The freedom and responsibility to patch
+
+Nix
