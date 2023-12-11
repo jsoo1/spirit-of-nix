@@ -41,7 +41,7 @@ painfully if you do not - see [[https://www.youtube.com/watch?v=9QMGAtxUlAc][Nod
 #+begin_quote
 Every common build/test/deploy-related activity should be possible
 with at most one command using Nix's command-line interface
--- Gabriella Gonzalez
+-- Gabriella Gonzalez, Nixos in Production
 #+end_quote
 
 This is a value that seems lovely and useful on the surface - and is
@@ -57,8 +57,8 @@ What this value means in practice is that you will be writing more Nix
 code than shell, haskell, elixir, rust, lua, go (insert your favorite
 language here) to coordinate package, process, and system definitions.
 
-This zen quality of nix workflows, in fact, stems from Nix' properties
-as a pure, lazy, functional programming language.
+This zen atomicity of nix workflows, in fact, stems from Nix'
+properties as a pure, lazy, functional programming language.
 
 This is a silly thing to say but: if you do not like Nix the
 programming language, you will likely not enjoy the experience of
@@ -66,4 +66,168 @@ using the Nix ecosystem in anger.
 
 ** Tech value 2: The freedom and responsibility to patch
 
-Nix
+Nix makes it very easy to locally patch, override, or otherwise modify
+software you use. In some regards it embodies the tenets of Free
+software with capital FSF.
+
+Combined with the other benefits of Nix (i.e.  ephemeral environments,
+atomic upgrades, multiple non-interfering package installs) - you have
+the power to really fearlessly hack your own environment.
+
+This "power to" also often translates to an "expecation that" you roll
+up your own sleeves.
+
+#+begin_quote
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+-- nixpkgs, COPYING
+#+end_quote
+
+The probability that you will submit a patch to nixpkgs in the process
+of deploying your first production system is very close to 1.
+
+** Tech value 3: [[https://www.haskellforall.com/2022/05/the-golden-rule-of-software.html][The Golden Rule of Software Distributions]]
+
+A corollary to the freedom and responsibility to patch
+
+Thanks again to Gabriella for putting words to this ethic.
+
+#+begin_quote
+A locally coherent package manager requires a globally coherent
+software distribution.
+-- Gabriella Gonzalez, "The Golden Rule of Software Distributions"
+#+end_quote
+
+Even though Nix provides you with great power to patch software
+locally, nixpkgs as a coherent package set is perhaps the Nix
+community's greatest contribution to the wider software community.
+
+If you were around during the days of "Cabal hell" or have ever
+experience PyPi or NPM hell, then you know the value of a package
+ecosystem that is tested altogether.
+
+This relates to the freedom and responsibility to patch in the
+following way:
+
+You will occasionally feel the desire to work around bugs in nixpkgs
+(or often upstream in the software itself). This is easy to do in the
+short run, but you will quickly rue the decision to vendor too many
+definitions, override too many packages, or locally patch too many
+things.
+
+* Idioms and common uses of Nixpkgs and NixOS
+
+When working with the Nixpkgs package set you will run into these
+types of nix expressions often. Understanding them will help you get
+the most out of your experience as a contributor and as a user.
+
+*Note* I'm going to assume you know what a derivation is, but just to
+recap: a derivation is the build recipe that go in the nix store as
+~.drv~ extension files. Nix the language is "pure" with respect to
+derivations. When you as to build a derivation, it is interpreted into
+the nix building process and the result is "realized" to the final
+outputs (i.e. take the recipe for bash and turn it into bash).
+
+** ~callPackage~
+
+*** The following comes from [[https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/ocaml/dune.nix][pkgs/build-support/ocaml/dune.nix]].
+
+This expression is meant to be used like so:presentation.org
+
+~callPackage pkgs/build-support/ocaml/dune.nix { }~
+
+It defines the ~buildDunePackage~ function that most all dune-based
+ocaml packages are built with.
+
+#+begin_src nix
+  { lib, stdenv, ocaml, findlib, dune_1, dune_2, dune_3 }:
+
+  { pname, version, nativeBuildInputs ? [], enableParallelBuilding ? true, ... }@args:
+
+  let Dune =
+    let dune-version = args.duneVersion or "3"; in
+    { "1" = dune_1; "2" = dune_2; "3" = dune_3; }."${dune-version}"
+  ; in
+
+  if (args ? minimumOCamlVersion && lib.versionOlder ocaml.version args.minimumOCamlVersion) ||
+     (args ? minimalOCamlVersion && lib.versionOlder ocaml.version args.minimalOCamlVersion)
+  then throw "${pname}-${version} is not available for OCaml ${ocaml.version}"
+  else
+
+  stdenv.mkDerivation ({
+
+    inherit enableParallelBuilding;
+    dontAddStaticConfigureFlags = true;
+    configurePlatforms = [];
+
+    buildPhase = ''
+      runHook preBuild
+      dune build -p ${pname} ''${enableParallelBuilding:+-j $NIX_BUILD_CORES}
+      runHook postBuild
+    '';
+    checkPhase = ''
+      runHook preCheck
+      dune runtest -p ${pname} ''${enableParallelBuilding:+-j $NIX_BUILD_CORES}
+      runHook postCheck
+    '';
+    installPhase = ''
+      runHook preInstall
+      dune install --prefix $out --libdir $OCAMLFIND_DESTDIR ${pname} \
+       ${if lib.versionAtLeast Dune.version "2.9"
+         then "--docdir $out/share/doc --mandir $out/share/man"
+         else ""}
+      runHook postInstall
+    '';
+
+    strictDeps = true;
+
+  } // (builtins.removeAttrs args [ "minimalOCamlVersion" "duneVersion" ]) // {
+
+    name = "ocaml${ocaml.version}-${pname}-${version}";
+
+    nativeBuildInputs = [ ocaml Dune findlib ] ++ nativeBuildInputs;
+
+    meta = (args.meta or {}) // { platforms = args.meta.platforms or ocaml.meta.platforms; };
+
+  })
+#+end_src
+
+*** Overriding a ~callPackage~ function
+
+~callPackage~ is a function that "auto-applies" a function (or
+filepath that evaluates to a function) to the parameters if they exist
+in the current package environment. This is commonly at the top-level
+package set like this expression, but may also be applied to other
+environments so python or haskell derivations also can have a similar
+type.
+
+Without any overrides, this would use the top-level stdenv, lib,
+ocaml, etc from the top-level package set. But, say you wanted to
+overide a particular dependency (findlib for instance), it could be
+"overridden" like this:
+
+#+begin_src nix
+    overridenBuildDunePackage =
+      callPackage ./pkgs/build-support/ocaml/dune.nix { findlib = my-other-findlib; };
+#+end_src
+
+This overrides the inputs to the callPackage function - which is often
+where "official" extension points are defined:
+
+The following comes from [[https://github.com/NixOS/nixpkgs/blob/master/pkgs/tools/compression/bzip2/default.nix][pkgs/tools/compression/bzip2/default.nix]] and it has official overrides for ~enableStatic~ or ~enableShared~
+
+#+begin_src nix
+  { lib, stdenv, fetchurl
+  , enableStatic ? with stdenv.hostPlatform; isStatic || isCygwin
+  , enableShared ? true
+  , autoreconfHook
+  , testers
+  }:
+    stdenv.mkDerivation { ... }
+#+end_src
+
+** ~overrideAttrs~
+
+The ~overrideAttrs~ function is the idiomatic way of overriding the
+fields of a derivation. It is a field of all derivations built with
+~stdenv.mkDerivation~ (in other words, most all derivations) - a
+"method" if you will.
