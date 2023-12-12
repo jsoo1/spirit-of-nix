@@ -1,4 +1,4 @@
-#+title: Nix 4 U
+#+title: Spirit of Nix
 
 * Who are you and why do you use Nix?
 
@@ -17,9 +17,8 @@
 
 ** And I'd like to give you a leg up so you can
 
-1. use Nix and NixOS in production
-2. apply NixOS to real-world deployment scenarios
-3. understand how _not_ to use Nix/NixOS
+1. Give you a feel for the values of the Nix community
+2. Understand some idioms and some things I wish I had known when I started using Nix more seriously
 
 * Shoutouts to Gabriella Gonzalez who already literally wrote the book
 
@@ -114,7 +113,19 @@ short run, but you will quickly rue the decision to vendor too many
 definitions, override too many packages, or locally patch too many
 things.
 
-* Idioms and common uses of Nixpkgs and NixOS
+*** Corollary: Maximum sharing
+
+The technical advantage of upstreaming things and a globally coherent
+package set.
+
+The way Nix gets any good performance at all is by reusing the same
+definitions across the entire package set.
+
+For instance: dynamic linking is strongly preferred in Nix and
+vendoring is frowned upon. This is because static linking vastly
+increases the size of the nix store.
+
+* Nixpkgs and NixOS idioms
 
 When working with the Nixpkgs package set you will run into these
 types of nix expressions often. Understanding them will help you get
@@ -125,13 +136,103 @@ recap: a derivation is the build recipe that go in the nix store as
 ~.drv~ extension files. Nix the language is "pure" with respect to
 derivations. When you as to build a derivation, it is interpreted into
 the nix building process and the result is "realized" to the final
-outputs (i.e. take the recipe for bash and turn it into bash).
+outputs (i.e. take the recipe for bash and turn it into the bash
+program).
+
+** Fixed points
+
+"modification in place" is required to give you the freedom to patch
+and modify your software. But as a pure functional language, no such
+feature exists. The solution to this is a variety of fixpoints.
+
+The two primary ones are:
+
+- overlays - used to configure the nixpkgs package set
+
+- ~eval-modules~ (aka ~eval-config~, aka ~nixos~) - used to configure NixOS
+
+Note that when using ~nixos~ or writing an overlay, you are
+programming to an interface - morally writing the ~(a -> a)~ function
+where ~fix :: (a -> a) -> a~.
+
+*** Overlays
+
+I won't go over overlays too much because [[https://nixos.wiki/wiki/Overlays][the wiki]] and [[https://nixos.org/manual/nixpkgs/stable/#chap-overlays][nixos.org docs]]
+on them are good and you probably used them some already. However a
+couple subtleties might be noted.
+
+- Referring to final at the top-level is a good way to get infinite
+  recursion
+
+#+begin_src nix
+  # first parameter is the final result of the fixpoint, prev is the
+  # result just prior
+  final: prev: {
+    redis = final.redis.overrideAttrs ... # <- kaboom!
+  }
+#+end_src
+
+- Composing overlays can be error prone due to non-commutativity of
+  overlays!
+
+#+begin_src nix
+  {
+    description = ''
+      how to overwrite a thing you wanted on accident,
+      beware of this!
+    '';
+    outputs = { nixpkgs, ... }: {
+      # composeManyExtensions can be good but beware of ordering
+      # problems!
+      overlays.default = nixpkgs.lib.composeManyExtensions [
+        (final: prev: { redis = /* do some very important redis modifications here ... */; })
+        (final: prev: { redis = /* overwrite your work here! */;  })
+      ];
+    };
+  }
+#+end_src
+
+*** ~eval-modules~ (aka ~nixos~)
+
+The ~eval-modules~ fixpoint has a type you've used before if you have
+configured NixOS:
+
+~config~ is the final result of the configuration, a-la ~final~ of
+overlays, however it is much more common to refer to it in configs:
+
+#+begin_src nix
+  { config, pkgs, ... }: {
+    # Again, this is slideware, don't set TERMINFO_DIRS unless you know
+    # what you are doing, it is set upstream pretty well
+    config.environment.variables.TERMINFO_DIRS =
+      [ "${pkgs.ncurses}/share/terminfo" ];
+  }
+#+end_src
+
+This means that infinite recursion is much more likely to occur in
+NixOS configs. Sadly, this can be miserable to debug, but the
+situation is improving.
+
+**** Writing modules
+
+Seeing as how you want to put Nix into production, you are undoubtedly
+going to write your own NixOS modules. For this I can offer no better
+place than the [[https://nixos.org/manual/nixos/stable/#sec-writing-modules][nixos.org docs]].
+
+**** Aside on deployment tools
+
+I humbly posit that NixOS is the killer feature of Nix (aside from dev
+environments, but that's child's play). There are a nice variety of
+tools (like [[https://github.com/Gabriella439/terraform-nixos-ng][terraform-nixos-ng]]) to deploy NixOS systems to various
+cloud providers or a server of your ownership. I recommend
+~nixos-rebuild~ as a starting place, it's pretty good as a deployment
+tool.
 
 ** ~callPackage~
 
 *** The following comes from [[https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/ocaml/dune.nix][pkgs/build-support/ocaml/dune.nix]].
 
-This expression is meant to be used like so:presentation.org
+This expression is meant to be used like so:
 
 ~callPackage pkgs/build-support/ocaml/dune.nix { }~
 
@@ -207,6 +308,11 @@ overide a particular dependency (findlib for instance), it could be
 
 #+begin_src nix
     overridenBuildDunePackage =
+      prev.buildDunePackage.override { findlib = my-other-findlib; };
+#+end_src
+
+#+begin_src nix
+    overridenBuildDunePackage =
       callPackage ./pkgs/build-support/ocaml/dune.nix { findlib = my-other-findlib; };
 #+end_src
 
@@ -231,3 +337,115 @@ The ~overrideAttrs~ function is the idiomatic way of overriding the
 fields of a derivation. It is a field of all derivations built with
 ~stdenv.mkDerivation~ (in other words, most all derivations) - a
 "method" if you will.
+
+You will often use this as part of an overlay to modify the build
+process, configure flags, patches, etc of an existing definition.
+
+#+begin_src nix
+  final: prev: {
+    # overrideAttrs : Derivation -> (Derivation -> Attrs) -> Derivation
+    #                 ^ self        ^ overriding function
+    redis = prev.redis.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [
+        # fetchpatch is an invaluable resource, just beware of using it
+        # on "bootstrap" packages which can cause infinite loops
+        (prev.fetchpatch {
+          url = "https://github.com/example/example/pulls/1.patch";
+          # When first building a fixed-output-derivation (one with a
+          # content hash) you can run into cache-freshness issues. So on
+          # the first build use the bogus hashes (like this one) to get
+          # the correct hash from the error message
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        })
+      ];
+    });
+  }
+#+end_src
+
+Note that often you will want to make a wrapper around an existing
+program to avoid rebuilding the whole thing, that's when ~makeWrapper~
+and ~runCommand~ come in handy:
+
+#+begin_src nix
+  { config, pkgs, ... }: {
+    config = {
+      # Slideware! defaultPackages is a bit error-prone! I recommend
+      # nix-shells/nix develop
+      environment.defaultPackages.my-psql =
+        let
+          pgUrl =
+            "postgres://${config.services.my-pg.user}@${config.services.my-pg.host}:${config.services.my-pg.port}/${config.services.my-pg.database}";
+        in
+          pkgs.runCommand "my-psql-with-url"
+            { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+              mkdir -p $out/bin
+              makeWrapper ${prev.postgresql}/bin/psql $out/bin/psql \
+                --set-default POSTGRES_URL ${pgUrl}
+            '';
+    };
+  }
+#+end_src
+
+* Schism. Err, I mean flakes!
+
+** Why are flakes so controversial?
+
+Simple, they contradict some of the aforementioned values, namely the
+Golden Rule of Software Distributions. Flakes allow for much more
+local overriding and encourage a more local-overriding approach.
+
+There are other issues, too: some flake-specific features still
+haven't ported back to standard Nix (i.e. evaluation caching). Plus,
+the development of flakes broke from the development of standard Nix
+evaluation in ways that feel like standard Nix use was forgotten.
+
+On top of that, using flakes requires that you already know the idioms
+mentioned above, and more! That's why I would focus on being good at
+Nix the language and ecosystem - since flakes build on them.
+
+** That said, there are good things about flakes!
+
+Though the UX of them is a bit obtuse. Here are a few things I wish
+I'd known:
+
+- flake refs and "new style" commands
+
+  Like ~nix-shell shell.nix~ but for the environment of the derivation:
+
+  #+begin_src shell
+    #              attributes of flake outputs follow the '#' (what these
+    #              are are shifting and probably will require
+    #              experimentation to get the thing you want,
+    #              unfortunately)
+    #              v
+    nix develop ./#packages.python3Packages.aiohttp
+    #           ^ flake in current directory, but could be git+https or
+    #           other url
+  #+end_src
+
+  ~nixos-rebuild~ can use flakes:
+
+  #+begin_src shell
+    nixos-rebuild switch --flake git+https://git.sr.ht/~jsoo/dotfiles#nixosConfigurations.vbox
+  #+end_src
+
+- flake urls query params are nice!
+
+  #+begin_src nix
+    {
+      inputs.jsoo.url = "git+https://git.sr.ht/~jsoo/dotfiles?rev=13aadf70cba83b631604e947c5aad5fb3f639f0c";
+    }
+  #+end_src
+
+- [[https://nixos.wiki/wiki/Flakes][The wiki on flakes]] is still the best reference on the current flake
+  schema (which changes, frustratingly, as mentioned)
+
+* Resources
+
+- nixos.org/learn.html
+- :e in repl (tab complete in repl)
+- in general repl is very good
+- :? in repl
+- --keep-going - places the failed build environment in /tmp/nix-build-xzy-N
+- breakpointHook - https://discourse.nixos.org/t/debug-a-failed-derivation-with-breakpointhook-and-cntr/8669
+  (drops into a container environment on failure)
